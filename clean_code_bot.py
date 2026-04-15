@@ -105,6 +105,98 @@ def _is_tty() -> bool:
     return sys.stdout.isatty() and sys.stderr.isatty()
 
 
+def waterfall_intro() -> None:
+    """Display an ASCII waterfall animation followed by a pwned message."""
+    if not _is_tty():
+        return
+
+    W = 62  # canvas width
+
+    # Water columns: each col has a random offset so drops fall at different speeds
+    num_cols = 30
+    cols = [random.randint(0, 6) for _ in range(num_cols)]
+    fall_chars  = ["|", ":", "!", "'", ";", "|", ":"]
+    splash_row  = ["~", "*", "o", "~", "+", "~", "*", "~", "o", "~"]
+    mist_row    = [".", "~", " ", ".", "~", " ", "~", ".", " ", "~"]
+
+    TOTAL_FRAMES = 22
+    LINES        = 10   # lines the animation occupies (kept fixed for cursor math)
+
+    def build_frame(tick: int) -> list[str]:
+        """Build one frame of the waterfall as a list of text rows."""
+        # ── cliff top ──
+        cliff = click.style("   /\\ " * (W // 6) + "  ", fg="white", bold=True)
+
+        # ── falling streams (rows 0-5) ──
+        stream_rows = []
+        for row in range(6):
+            line = [" "] * W
+            for ci, offset in enumerate(cols):
+                x = 2 + ci * 2
+                if x >= W:
+                    break
+                depth = (tick + offset + ci) % len(fall_chars)
+                visible = (tick + offset) % 8 > row
+                if visible:
+                    ch = fall_chars[(depth + row) % len(fall_chars)]
+                    bright = (depth + row) % 3 == 0
+                    colored = click.style(ch, fg="cyan", bold=bright)
+                    line[x] = colored
+                    if x + 1 < W:
+                        line[x + 1] = click.style(".", fg="blue")
+            stream_rows.append("".join(line))
+
+        # ── splash surface ──
+        splash = "".join(
+            click.style(splash_row[(i + tick) % len(splash_row)], fg="cyan", bold=(i + tick) % 4 == 0)
+            for i in range(W)
+        )
+
+        # ── mist pool ──
+        mist = "".join(
+            click.style(mist_row[(i + tick + 1) % len(mist_row)], fg="blue")
+            for i in range(W)
+        )
+
+        # ── pool floor ──
+        floor = click.style("~" * W, fg="blue", bold=True)
+
+        return [cliff, *stream_rows, splash, mist, floor]
+
+    # Print first frame to establish cursor position
+    first = build_frame(0)
+    for row in first:
+        click.echo(row, err=True)
+    time.sleep(0.07)
+
+    # Animate subsequent frames in-place
+    for tick in range(1, TOTAL_FRAMES):
+        # Move cursor back up LINES rows
+        sys.stderr.write(f"\033[{LINES}A")
+        sys.stderr.flush()
+        for row in build_frame(tick):
+            click.echo(row, err=True)
+        time.sleep(0.07)
+
+    # ── PWNED message ──
+    pwned_lines = [
+        "",
+        click.style("  +-------------------------------------------------+", fg="yellow", bold=True),
+        click.style("  |                                                 |", fg="yellow", bold=True),
+        click.style("  |   " + click.style(" >>> I PWNED YOU, Mr. Anderson! <<<  ", fg="red", bold=True) + "   |", fg="yellow", bold=True),
+        click.style("  |   " + click.style("  Your dirty code is MINE now. 😈    ", fg="bright_white") +    "   |", fg="yellow", bold=True),
+        click.style("  |   " + click.style("  Resistance is futile. Refactor.    ", fg="green") +           "   |", fg="yellow", bold=True),
+        click.style("  |                                                 |", fg="yellow", bold=True),
+        click.style("  +-------------------------------------------------+", fg="yellow", bold=True),
+        "",
+    ]
+    for line in pwned_lines:
+        click.echo(line, err=True)
+        time.sleep(0.06)
+
+    play_sound("alert")
+
+
 def play_sound(sound_type: str = "alert") -> None:
     """Play a system sound. Falls back silently if unavailable."""
     try:
@@ -566,8 +658,9 @@ def main(
       python clean_code_bot.py -f code.py --provider ollama --model mistral
       python clean_code_bot.py -f code.py --dry-run
     """
-    # --- Banner ---
+    # --- Intro ---
     if not dry_run:
+        waterfall_intro()
         print_banner()
         matrix_rain(lines=4)
 
