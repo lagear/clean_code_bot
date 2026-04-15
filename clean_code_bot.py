@@ -22,9 +22,11 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 try:
+    import warnings
     import pygame
+    import pygame.mixer  # verify the mixer submodule is actually loadable
     _PYGAME_AVAILABLE = True
-except ImportError:
+except (ImportError, ModuleNotFoundError):
     _PYGAME_AVAILABLE = False
 
 load_dotenv()
@@ -126,14 +128,20 @@ def start_midi(loops: int = -1) -> bool:
     if not _PYGAME_AVAILABLE or not _MIDI_FILE.exists():
         return False
     try:
-        # Suppress pygame's "Hello from the pygame community." stdout banner
+        # Suppress pygame's stdout banner and any mixer RuntimeWarnings
         devnull = open(os.devnull, "w")
         old_stdout, sys.stdout = sys.stdout, devnull
         try:
-            pygame.mixer.init()
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                pygame.mixer.init()
         finally:
             sys.stdout = old_stdout
             devnull.close()
+
+        if not pygame.mixer.get_init():
+            return False  # mixer loaded but audio driver unavailable — skip silently
+
         pygame.mixer.music.load(str(_MIDI_FILE))
         pygame.mixer.music.set_volume(0.6)
         pygame.mixer.music.play(loops=loops)
