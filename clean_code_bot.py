@@ -12,6 +12,7 @@ import random
 import re
 import subprocess
 import sys
+import threading
 import time
 import os
 from pathlib import Path
@@ -103,6 +104,118 @@ PHASE_HEADERS = [
 def _is_tty() -> bool:
     """Return True if running in an interactive terminal (not piped or in tests)."""
     return sys.stdout.isatty() and sys.stderr.isatty()
+
+
+_ANALYSIS_MESSAGES = [
+    "SCANNING FOR SOLID VIOLATIONS...",
+    "CONSULTING THE ORACLE...",
+    "JACKING INTO THE CODE MATRIX...",
+    "DETECTING DESIGN PATTERN ANOMALIES...",
+    "DECODING YOUR SPAGHETTI...",
+    "NEGOTIATING WITH AGENT SMITH...",
+    "FOLLOWING THE WHITE RABBIT...",
+    "BENDING THE SPOON... AND YOUR CLASS HIERARCHY...",
+    "THERE IS NO CLEAN CODE. WAIT, YES THERE IS.",
+    "UPLOADING SOLID PRINCIPLES INTO THE MAINFRAME...",
+]
+
+def _matrix_analysis_animation(stop_event: threading.Event) -> None:
+    """
+    Full-screen Matrix rain that plays while the LLM is processing.
+    Runs in a background thread; stops cleanly when stop_event is set.
+    """
+    if not _is_tty():
+        return
+
+    HEIGHT   = 14   # rain rows
+    WIDTH    = 72
+    BAR_W    = WIDTH - 6
+
+    # Each column tracks its leading-drop row position
+    cols = [random.randint(-HEIGHT, 0) for _ in range(WIDTH // 2)]
+    # Tail lengths per column
+    tails = [random.randint(4, HEIGHT - 2) for _ in range(WIDTH // 2)]
+
+    # Reserve space
+    total_lines = HEIGHT + 3   # rain + message + bar + blank
+    for _ in range(total_lines):
+        sys.stderr.write("\n")
+    sys.stderr.flush()
+
+    tick     = 0
+    msg_idx  = 0
+
+    while not stop_event.is_set():
+        # ── build rain grid ──
+        grid = [[" "] * WIDTH for _ in range(HEIGHT)]
+
+        for ci, head in enumerate(cols):
+            x = ci * 2
+            if x >= WIDTH:
+                break
+            tail = tails[ci]
+            for offset in range(tail):
+                y = head - offset
+                if not (0 <= y < HEIGHT):
+                    continue
+                if offset == 0:
+                    ch = click.style(random.choice(MATRIX_CHARS), fg="bright_white", bold=True)
+                elif offset < 3:
+                    ch = click.style(random.choice(MATRIX_CHARS), fg="bright_green", bold=True)
+                elif offset < tail - 2:
+                    ch = click.style(random.choice(MATRIX_CHARS), fg="green")
+                else:
+                    ch = click.style(random.choice(MATRIX_CHARS), fg="green", dim=True)
+                grid[y][x] = ch
+
+        # advance columns
+        for ci in range(len(cols)):
+            cols[ci] += 1
+            if cols[ci] > HEIGHT + tails[ci] + random.randint(0, 6):
+                cols[ci]  = random.randint(-HEIGHT, -1)
+                tails[ci] = random.randint(4, HEIGHT - 2)
+
+        # ── rotating status message ──
+        if tick % 18 == 0 and tick > 0:
+            msg_idx = (msg_idx + 1) % len(_ANALYSIS_MESSAGES)
+        msg = _ANALYSIS_MESSAGES[msg_idx].center(WIDTH)
+
+        # ── animated progress bar ──
+        filled  = tick % (BAR_W + 1)
+        bar_str = "[" + click.style("=" * filled, fg="green", bold=True) + click.style("-" * (BAR_W - filled), fg="green") + "]"
+
+        # ── redraw ──
+        sys.stderr.write(f"\033[{total_lines}A")
+        for row in grid:
+            sys.stderr.write("".join(row) + "\n")
+        sys.stderr.write(click.style(msg, fg="yellow", bold=True) + "\n")
+        sys.stderr.write("  " + bar_str + "\n")
+        sys.stderr.write("\n")
+        sys.stderr.flush()
+
+        tick += 1
+        time.sleep(0.07)
+
+    # ── clear animation area ──
+    sys.stderr.write(f"\033[{total_lines}A")
+    for _ in range(total_lines):
+        sys.stderr.write(" " * (WIDTH + 2) + "\n")
+    sys.stderr.write(f"\033[{total_lines}A")
+    sys.stderr.flush()
+
+
+def start_analysis_animation() -> tuple[threading.Thread, threading.Event]:
+    """Start the Matrix analysis animation in a background thread."""
+    stop = threading.Event()
+    t = threading.Thread(target=_matrix_analysis_animation, args=(stop,), daemon=True)
+    t.start()
+    return t, stop
+
+
+def stop_analysis_animation(thread: threading.Thread, stop: threading.Event) -> None:
+    """Signal the animation to stop and wait for it to clean up."""
+    stop.set()
+    thread.join(timeout=2.0)
 
 
 def waterfall_intro() -> None:
@@ -735,13 +848,17 @@ def main(
         err=True,
     )
 
-    # --- Call LLM ---
+    # --- Call LLM (with Matrix animation while waiting) ---
+    anim_thread, anim_stop = start_analysis_animation()
     try:
         raw_response = call_llm(client, resolved_model, user_prompt)
     except Exception as exc:  # noqa: BLE001
+        stop_analysis_animation(anim_thread, anim_stop)
         play_sound("error")
         click.echo(click.style(f"\n  [X] API error: {exc}", fg="red", bold=True), err=True)
         sys.exit(1)
+    finally:
+        stop_analysis_animation(anim_thread, anim_stop)
 
     # --- Parse response ---
     reasoning, refactored_code = extract_refactored_code(raw_response)
