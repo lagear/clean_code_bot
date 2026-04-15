@@ -13,10 +13,11 @@ Supports three LLM backends: **OpenAI**, **Groq** (free cloud tier), and **Ollam
 - Refactors code to follow all five SOLID principles
 - Adds docstrings (Python) or JSDoc (JavaScript/TypeScript)
 - Chain-of-Thought reasoning: analyze → plan → refactor
-- Supports **OpenAI** and **Groq** (free tier) as LLM providers
+- Supports **OpenAI**, **Groq** (free tier), and **Ollama** (local) as LLM providers
 - Prompt injection protection
 - `--dry-run` mode to preview the prompt before sending
 - `--verbose` mode to inspect the AI's reasoning
+- Matrix-themed ASCII animations, waterfall intro, and background music while the AI analyzes
 
 ---
 
@@ -315,6 +316,59 @@ Additional safeguards:
 - **Extension allowlist** — only recognized source file types are accepted
 - **Binary file rejection** — files with null bytes are refused
 - **Structured prompt** — user code is always wrapped in `<SOURCE_CODE>` delimiters; the system prompt is never user-influenced
+
+---
+
+## Background Music
+
+While the AI is analyzing your code, the bot plays **Rock_Is_Dead.wav** as looping background music — no extra libraries or installs required.
+
+| Platform | Player used        | Requirement          |
+|----------|--------------------|----------------------|
+| macOS    | `afplay`           | Built-in, nothing to install |
+| Linux    | `aplay`            | Part of `alsa-utils` (usually pre-installed) |
+| Windows  | `winsound`         | Python stdlib, nothing to install |
+
+The music loops continuously from the moment the LLM request is sent until the refactored code arrives. It stops automatically when the analysis is complete.
+
+### Replace the music
+
+Drop any `.wav` file into the project folder and rename it `Rock_Is_Dead_beeps.wav` — the bot will play it instead.
+
+To regenerate the default file from the original MIDI at any time:
+
+```bash
+.venv/bin/python -c "
+import mido, wave, math, array, io
+from pathlib import Path
+
+RATE = 22050
+CAP  = 25.0
+max_samp = int(RATE * CAP)
+samples, active, current = [], set(), 0
+
+for msg in mido.MidiFile('Rock_Is_Dead.mid'):
+    gap = min(int(msg.time * RATE), max_samp - current)
+    if gap > 0:
+        freqs = [440.0 * 2**((n-69)/12) for n in active] if active else []
+        amp   = 18000.0 / max(1, len(freqs)**0.5)
+        for i in range(gap):
+            t = (current + i) / RATE
+            s = sum(math.sin(2*math.pi*f*t) for f in freqs) if freqs else 0
+            samples.append(int(amp * s / max(1, len(freqs)**0.5)))
+        current += gap
+    if current >= max_samp: break
+    if msg.type == 'note_on'  and msg.velocity > 0: active.add(msg.note)
+    if msg.type == 'note_off' or (msg.type == 'note_on' and msg.velocity == 0): active.discard(msg.note)
+
+buf = io.BytesIO()
+with wave.open(buf, 'wb') as w:
+    w.setnchannels(1); w.setsampwidth(2); w.setframerate(RATE)
+    w.writeframes(array.array('h', (max(-32768,min(32767,s)) for s in samples)).tobytes())
+Path('Rock_Is_Dead_beeps.wav').write_bytes(buf.getvalue())
+print('done')
+"
+```
 
 ---
 
