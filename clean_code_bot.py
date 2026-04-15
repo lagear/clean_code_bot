@@ -21,12 +21,16 @@ import click
 from dotenv import load_dotenv
 from openai import OpenAI
 
+import warnings
+os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")  # must be set before pygame import
 try:
-    import warnings
     import pygame
-    import pygame.mixer  # verify the mixer submodule is actually loadable
+    # hasattr returns True even when mixer isn't built — test it directly
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        _dummy = pygame.mixer.get_init  # raises NotImplementedError if not compiled
     _PYGAME_AVAILABLE = True
-except (ImportError, ModuleNotFoundError):
+except (ImportError, NotImplementedError, Exception):
     _PYGAME_AVAILABLE = False
 
 load_dotenv()
@@ -118,48 +122,101 @@ def _is_tty() -> bool:
 _MIDI_FILE = Path(__file__).parent / "Rock_Is_Dead.mid"
 
 
-def start_midi(loops: int = -1) -> bool:
-    """
-    Start playing the MIDI background music.
+_midi_process: subprocess.Popen | None = None  # holds subprocess-based player handle
 
-    Returns True if playback started successfully, False otherwise.
-    Never raises — failures are silently swallowed so they never block execution.
-    """
-    if not _PYGAME_AVAILABLE or not _MIDI_FILE.exists():
+
+def _start_midi_pygame(loops: int) -> bool:
+    """Try to play MIDI via pygame. Returns True on success."""
+    if not _PYGAME_AVAILABLE:
         return False
     try:
-        # Suppress pygame's stdout banner and any mixer RuntimeWarnings
-        devnull = open(os.devnull, "w")
-        old_stdout, sys.stdout = sys.stdout, devnull
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                pygame.mixer.init()
-        finally:
-            sys.stdout = old_stdout
-            devnull.close()
-
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            pygame.mixer.pre_init(44100, -16, 2, 512)
+            pygame.init()
         if not pygame.mixer.get_init():
-            return False  # mixer loaded but audio driver unavailable — skip silently
-
+            return False
         pygame.mixer.music.load(str(_MIDI_FILE))
-        pygame.mixer.music.set_volume(0.6)
+        pygame.mixer.music.set_volume(0.7)
         pygame.mixer.music.play(loops=loops)
         return True
     except Exception:  # noqa: BLE001
         return False
 
 
-def stop_midi() -> None:
-    """Stop MIDI playback. Never raises."""
-    if not _PYGAME_AVAILABLE:
-        return
+def _start_midi_subprocess() -> bool:
+    """
+    Play MIDI via a background subprocess.
+    Tries fluidsynth → timidity, whichever is installed.
+    Returns True if a player was found and launched.
+    """
+    global _midi_process
+
+    # fluidsynth: needs a soundfont — look for one in common locations
+    sf2_candidates = [
+        # Homebrew fluid-synth (macOS)
+        "/opt/homebrew/Cellar/fluid-synth/2.5.3/share/fluid-synth/sf2/VintageDreamsWaves-v2.sf2",
+        "/opt/homebrew/share/fluid-synth/sf2/VintageDreamsWaves-v2.sf2",
+        "/usr/local/share/fluid-synth/sf2/VintageDreamsWaves-v2.sf2",
+        # Linux common paths
+        "/usr/share/sounds/sf2/FluidR3_GM.sf2",
+        "/usr/share/soundfonts/FluidR3_GM.sf2",
+        "/usr/share/sounds/sf2/GeneralUser_GS_v1.471.sf2",
+    ]
+    sf2 = next((p for p in sf2_candidates if os.path.exists(p)), None)
+
     try:
-        if pygame.mixer.get_init():
-            pygame.mixer.music.stop()
-            pygame.mixer.quit()
+        if subprocess.run(["which", "fluidsynth"], capture_output=True).returncode == 0 and sf2:
+            _midi_process = subprocess.Popen(
+                ["fluidsynth", "-a", "coreaudio", "-q", "-i", sf2, str(_MIDI_FILE)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            return True
     except Exception:  # noqa: BLE001
         pass
+
+    try:
+        if subprocess.run(["which", "timidity"], capture_output=True).returncode == 0:
+            _midi_process = subprocess.Popen(
+                ["timidity", str(_MIDI_FILE), "-A", "200"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+
+    return False
+
+
+def start_midi(loops: int = -1) -> bool:
+    """
+    Start playing the MIDI background music.
+
+    Tries pygame first, then fluidsynth, then timidity.
+    Returns True if any method succeeded. Never raises.
+    """
+    if not _MIDI_FILE.exists():
+        return False
+    return _start_midi_pygame(loops) or _start_midi_subprocess()
+
+
+def stop_midi() -> None:
+    """Stop MIDI playback (pygame or subprocess). Never raises."""
+    global _midi_process
+    try:
+        if _PYGAME_AVAILABLE and pygame.mixer.get_init():
+            pygame.mixer.music.stop()
+            pygame.quit()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        if _midi_process and _midi_process.poll() is None:
+            _midi_process.terminate()
+            _midi_process = None
+    except Exception:  # noqa: BLE001
+        pass
+
+
 
 
 _ANALYSIS_MESSAGES = [
