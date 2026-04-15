@@ -123,6 +123,7 @@ _MIDI_FILE = Path(__file__).parent / "Rock_Is_Dead.mid"
 
 
 _midi_process: subprocess.Popen | None = None  # holds subprocess-based player handle
+_beep_tmp_file: str | None = None              # temp WAV written by the beep fallback
 
 
 def _start_midi_pygame(loops: int) -> bool:
@@ -188,21 +189,134 @@ def _start_midi_subprocess() -> bool:
     return False
 
 
+def _midi_to_wav_bytes(cap_seconds: float = 25.0) -> bytes | None:
+    """
+    Synthesise a WAV from Rock_Is_Dead.mid using mido + stdlib only.
+
+    Converts MIDI note events into sine waves, mixes simultaneous notes
+    (chords), and caps the output at cap_seconds to keep the file small.
+    Returns raw WAV bytes, or None if mido is not installed or parsing fails.
+    """
+    try:
+        import array
+        import io
+        import math
+        import wave
+        import mido  # soft dependency — only used here
+
+        RATE = 22050
+        max_samp = int(RATE * cap_seconds)
+        samples: list[float] = []
+        active: set[int] = set()   # MIDI note numbers currently held
+        current = 0                # current sample position
+
+        mid = mido.MidiFile(str(_MIDI_FILE))
+
+        for msg in mid:            # mido yields messages with .time in seconds
+            gap = int(msg.time * RATE)
+
+            if gap > 0:
+                actual = min(gap, max_samp - current)
+                if active:
+                    freqs = [440.0 * 2 ** ((n - 69) / 12.0) for n in active]
+                    amp = 18000.0 / max(1, len(freqs) ** 0.5)
+                    for i in range(actual):
+                        t = (current + i) / RATE
+                        s = sum(math.sin(2 * math.pi * f * t) for f in freqs)
+                        samples.append(amp * s / max(1, len(freqs) ** 0.5))
+                else:
+                    samples.extend([0.0] * actual)
+                current += actual
+
+            if current >= max_samp:
+                break
+
+            if msg.type == "note_on" and msg.velocity > 0:
+                active.add(msg.note)
+            elif msg.type == "note_off" or (msg.type == "note_on" and msg.velocity == 0):
+                active.discard(msg.note)
+
+        if not samples:
+            return None
+
+        # Clamp to int16 and pack efficiently with array module
+        clamped = array.array("h", (max(-32768, min(32767, int(s))) for s in samples))
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(RATE)
+            w.writeframes(clamped.tobytes())
+        return buf.getvalue()
+
+    except Exception:  # noqa: BLE001 — mido not installed, corrupt file, etc.
+        return None
+
+
+def _start_midi_beeps() -> bool:
+    """
+    Pure-Python last-resort fallback: synthesise sine-wave beeps from MIDI
+    and loop them via afplay (macOS), aplay (Linux), or winsound (Windows).
+
+    Requires the `mido` package for MIDI parsing; everything else is stdlib.
+    Never raises — returns False silently if it cannot produce sound.
+    """
+    global _midi_process, _beep_tmp_file
+
+    wav_data = _midi_to_wav_bytes()
+    if not wav_data:
+        return False
+
+    import tempfile
+    try:
+        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        tmp.write(wav_data)
+        tmp.close()
+        _beep_tmp_file = tmp.name
+
+        system = platform.system()
+
+        if system == "Windows":
+            # winsound.PlaySound is synchronous; loop in a daemon thread
+            def _win_loop() -> None:
+                import winsound
+                while _beep_tmp_file:
+                    try:
+                        winsound.PlaySound(_beep_tmp_file, winsound.SND_FILENAME)
+                    except Exception:  # noqa: BLE001
+                        break
+            threading.Thread(target=_win_loop, daemon=True).start()
+            return True
+
+        # macOS / Linux: shell loop so the subprocess handles repeating
+        player = "afplay" if system == "Darwin" else "aplay -q"
+        cmd = ["sh", "-c", f'while [ -f "{_beep_tmp_file}" ]; do {player} "{_beep_tmp_file}"; done']
+        _midi_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def start_midi(loops: int = -1) -> bool:
     """
     Start playing the MIDI background music.
 
-    Tries pygame first, then fluidsynth, then timidity.
-    Returns True if any method succeeded. Never raises.
+    Strategy (first success wins):
+      1. pygame  — best quality, needs pygame.mixer compiled for this Python
+      2. fluidsynth / timidity  — needs external binary + soundfont
+      3. pure-Python beep synth  — stdlib + mido, works everywhere
+
+    Never raises. Returns True if any method produced audio.
     """
     if not _MIDI_FILE.exists():
         return False
-    return _start_midi_pygame(loops) or _start_midi_subprocess()
+    return _start_midi_pygame(loops) or _start_midi_subprocess() or _start_midi_beeps()
 
 
 def stop_midi() -> None:
-    """Stop MIDI playback (pygame or subprocess). Never raises."""
-    global _midi_process
+    """Stop MIDI playback (pygame, subprocess, or beep thread). Never raises."""
+    global _midi_process, _beep_tmp_file
     try:
         if _PYGAME_AVAILABLE and pygame.mixer.get_init():
             pygame.mixer.music.stop()
@@ -213,6 +327,12 @@ def stop_midi() -> None:
         if _midi_process and _midi_process.poll() is None:
             _midi_process.terminate()
             _midi_process = None
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        if _beep_tmp_file and os.path.exists(_beep_tmp_file):
+            os.unlink(_beep_tmp_file)  # shell loop exits when file disappears
+            _beep_tmp_file = None
     except Exception:  # noqa: BLE001
         pass
 
