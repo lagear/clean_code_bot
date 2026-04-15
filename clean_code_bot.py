@@ -21,6 +21,12 @@ import click
 from dotenv import load_dotenv
 from openai import OpenAI
 
+try:
+    import pygame
+    _PYGAME_AVAILABLE = True
+except ImportError:
+    _PYGAME_AVAILABLE = False
+
 load_dotenv()
 
 # ---------------------------------------------------------------------------
@@ -104,6 +110,48 @@ PHASE_HEADERS = [
 def _is_tty() -> bool:
     """Return True if running in an interactive terminal (not piped or in tests)."""
     return sys.stdout.isatty() and sys.stderr.isatty()
+
+
+# Locate the MIDI file relative to this script
+_MIDI_FILE = Path(__file__).parent / "Rock_Is_Dead.mid"
+
+
+def start_midi(loops: int = -1) -> bool:
+    """
+    Start playing the MIDI background music.
+
+    Returns True if playback started successfully, False otherwise.
+    Never raises — failures are silently swallowed so they never block execution.
+    """
+    if not _PYGAME_AVAILABLE or not _MIDI_FILE.exists():
+        return False
+    try:
+        # Suppress pygame's "Hello from the pygame community." stdout banner
+        devnull = open(os.devnull, "w")
+        old_stdout, sys.stdout = sys.stdout, devnull
+        try:
+            pygame.mixer.init()
+        finally:
+            sys.stdout = old_stdout
+            devnull.close()
+        pygame.mixer.music.load(str(_MIDI_FILE))
+        pygame.mixer.music.set_volume(0.6)
+        pygame.mixer.music.play(loops=loops)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def stop_midi() -> None:
+    """Stop MIDI playback. Never raises."""
+    if not _PYGAME_AVAILABLE:
+        return
+    try:
+        if pygame.mixer.get_init():
+            pygame.mixer.music.stop()
+            pygame.mixer.quit()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 _ANALYSIS_MESSAGES = [
@@ -205,7 +253,8 @@ def _matrix_analysis_animation(stop_event: threading.Event) -> None:
 
 
 def start_analysis_animation() -> tuple[threading.Thread, threading.Event]:
-    """Start the Matrix analysis animation in a background thread."""
+    """Start the Matrix analysis animation and background MIDI music."""
+    start_midi()
     stop = threading.Event()
     t = threading.Thread(target=_matrix_analysis_animation, args=(stop,), daemon=True)
     t.start()
@@ -213,9 +262,10 @@ def start_analysis_animation() -> tuple[threading.Thread, threading.Event]:
 
 
 def stop_analysis_animation(thread: threading.Thread, stop: threading.Event) -> None:
-    """Signal the animation to stop and wait for it to clean up."""
+    """Signal the animation to stop, clean up terminal, and stop music."""
     stop.set()
     thread.join(timeout=2.0)
+    stop_midi()
 
 
 def waterfall_intro() -> None:
